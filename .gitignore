@@ -1,0 +1,16 @@
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+*.pem
+lambda_function.zip
+simulator_lambda.zip
+payload.json
+isolate-out.json
+simulator-out.json
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
