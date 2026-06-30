@@ -31,14 +31,21 @@ Manual isolation still works with:
 }
 ```
 
-## Architecture flow
+## Architecture
+
+**AWS Automated Incident Response Lab v1.4** — Detect → Preserve Evidence → Contain → Notify
+
+![AWS Automated Incident Response Lab v1.4 architecture diagram](docs/architecture-v1.4.png)
+
+### Workflow summary
 
 1. Operator invokes simulator Lambda
 2. Simulator Lambda runs a short CPU burn loop on the EC2 instance via SSM
 3. EC2 CPU utilization rises
 4. CloudWatch alarm enters `ALARM`
 5. SNS invokes isolation Lambda
-6. Isolation Lambda snapshots volumes, removes IAM profile, attaches quarantine SG, and notifies SNS
+6. Isolation Lambda creates tagged EBS snapshots, removes IAM profile, attaches quarantine SG, and notifies SNS
+7. Email subscribers receive the incident details
 
 ## Prerequisites
 
