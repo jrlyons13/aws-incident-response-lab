@@ -42,9 +42,19 @@ Manual isolation still works with:
 
 ## Architecture
 
-**AWS Automated Incident Response Lab v1.4** — Detect → Preserve Evidence → Contain → Notify
+**AWS Automated Incident Response Lab v1.5** — Detect → Preserve Evidence → Contain → Notify
 
 ![AWS Automated Incident Response Lab v1.4 architecture diagram](docs/architecture-v1.4.png)
+
+### SNS notification fan-out
+
+All incident events publish to one SNS topic. Multiple subscribers receive each message:
+
+| Subscriber | Protocol | Purpose |
+|------------|----------|---------|
+| Isolation Lambda | Lambda | Automated containment |
+| Slack notifier Lambda | Lambda | Formatted Slack alerts |
+| Email | Email | Manual subscription (optional) |
 
 ### Workflow summary
 
@@ -52,9 +62,13 @@ Manual isolation still works with:
 2. Simulator Lambda runs a short CPU burn loop on the EC2 instance via SSM
 3. EC2 CPU utilization rises
 4. CloudWatch alarm enters `ALARM`
-5. SNS invokes isolation Lambda
-6. Isolation Lambda creates tagged EBS snapshots, removes IAM profile, attaches quarantine SG, and notifies SNS
-7. Email and Slack subscribers receive the incident details
+5. SNS delivers the alarm to **Slack**, **email**, and invokes the **isolation Lambda**
+6. Isolation Lambda creates tagged EBS snapshots, removes IAM profile, attaches quarantine SG, and publishes a result to SNS
+7. SNS delivers the isolation result to **Slack** and **email**
+
+During a full dry run you should receive **two Slack messages** and **two emails**:
+1. CloudWatch alarm notification
+2. Isolation completion notification
 
 ## Prerequisites
 
@@ -85,7 +99,7 @@ aws sts get-caller-identity
 |------|---------|
 | `main.tf` | Networking, EC2, IAM, SNS, CloudWatch alarm, and Lambda resources |
 | `variables.tf` | Input variables |
-| `outputs.tf` | Useful values after deployment |
+| `outputs.tf` | Useful values after deployment (includes `slack_notifier_lambda_name`, `slack_webhook_secret_name`) |
 | `lambda_function.py` | Isolation handler code |
 | `simulator_lambda.py` | CPU stress simulator handler code |
 | `slack_notifier_lambda.py` | Slack notification handler code |
@@ -128,9 +142,46 @@ Or in the AWS Console:
 
 The Slack notifier Lambda will not work until this secret value is set.
 
+The secret value must be **only the webhook URL** — no quotes, no JSON wrapper, no extra spaces.
+
+### Slack message examples
+
+During a full incident simulation, the Slack notifier sends **plain-text** messages (markdown disabled so CloudWatch alarm details display reliably).
+
+**Message 1 — CloudWatch alarm**
+
+```text
+CloudWatch Alarm Triggered
+Alarm:     ir-isolation-lab-cpu-high
+State:     ALARM
+Instance:  i-0123456789abcdef0
+Metric:    CPUUtilization GreaterThanThreshold 90
+Reason:    Threshold Crossed: 1 datapoint was greater than the threshold (90.0).
+Time:      2026-07-01T06:00:00.000+0000
+```
+
+**Message 2 — Isolation complete**
+
+```text
+Isolation Has Occurred
+Incident Type: SimulatedCryptoJacking
+Instance ID:   i-0123456789abcdef0
+Snapshots:     snap-0abc123def4567890
+IAM Profile:   disassociated_iam_instance_profile
+Quarantine SG: sg-0abc123def4567890
+Status:        isolated
+Time (UTC):    2026-07-01T06:00:03.950737+00:00
+```
+
+If isolation fails, the header changes to **Isolation Failed** and includes an error line.
+
+If the alarm clears, the header is **CloudWatch Alarm Cleared**.
+
+Slack messages are delivered to the **channel configured when you created the Incoming Webhook** — not to DMs.
+
 ### Test Slack notifications
 
-Send a test message through SNS:
+Send a generic test message through SNS:
 
 ```powershell
 aws sns publish `
@@ -139,12 +190,14 @@ aws sns publish `
   --message "Test notification from the incident response lab."
 ```
 
+You should see a generic Slack message with subject `IR Lab Slack Test`.
+
 During a full incident simulation you should receive **two Slack messages**:
 
 1. **CloudWatch Alarm Triggered** when the CPU alarm enters `ALARM`
 2. **Isolation Has Occurred** after the isolation Lambda completes
 
-Check CloudWatch Logs for `terraform output -raw slack_notifier_lambda_name` if Slack messages do not appear.
+Check CloudWatch Logs for `terraform output -raw slack_notifier_lambda_name` if Slack messages do not appear. Logs include the detected message type (`alarm`, `isolation`, or `generic`).
 
 Terraform also creates a private key file named `ir-isolation-lab-key.pem` in this directory.
 
@@ -161,22 +214,26 @@ aws sns subscribe `
 
 Check your inbox and confirm the subscription.
 
-## v1.4 test plan
+## v1.5 test plan
 
 1. Run `terraform apply`
-2. Confirm EC2 starts with the app SG and IAM instance profile
-3. Confirm SNS email subscription if configured manually
-4. Invoke the simulator Lambda
-5. Watch CloudWatch CPU metric rise
-6. Confirm CloudWatch alarm enters `ALARM`
-7. Confirm SNS triggers the isolation Lambda
-8. Confirm EBS snapshot exists with incident tags
-9. Confirm IAM instance profile is removed
-10. Confirm quarantine SG is attached
-11. Confirm HTTP access fails
-12. Confirm SNS email contains incident details
-13. Run `terraform destroy`
-14. Verify all lab resources are removed
+2. Add the Slack webhook URL to Secrets Manager
+3. Confirm EC2 starts with the app SG and IAM instance profile
+4. Confirm SNS email subscription if configured manually
+5. Send a test SNS message and confirm it appears in Slack
+6. Invoke the simulator Lambda
+7. Watch CloudWatch CPU metric rise
+8. Confirm CloudWatch alarm enters `ALARM`
+9. Confirm **Slack message 1:** `CloudWatch Alarm Triggered`
+10. Confirm SNS triggers the isolation Lambda
+11. Confirm EBS snapshot exists with incident tags
+12. Confirm IAM instance profile is removed
+13. Confirm quarantine SG is attached
+14. Confirm HTTP access fails
+15. Confirm **Slack message 2:** `Isolation Has Occurred`
+16. Confirm SNS email contains both alarm and isolation details
+17. Run `terraform destroy`
+18. Verify all lab resources are removed
 
 ## Verify the instance before the incident
 
@@ -305,8 +362,9 @@ After automated or manual isolation:
      - `IncidentType=SimulatedCryptoJacking`
      - `CreatedBy=IncidentResponseLab`
 
-4. **SNS notification**
-   - Email should include incident type, instance ID, snapshot IDs, IAM result, quarantine SG ID, timestamp, and final status
+4. **SNS notifications**
+   - **Email** should include incident type, instance ID, snapshot IDs, IAM result, quarantine SG ID, timestamp, and final status
+   - **Slack** should show `CloudWatch Alarm Triggered` followed by `Isolation Has Occurred`
 
 ## Restore normal access (optional)
 
@@ -332,6 +390,7 @@ You can also delete local generated files if they remain:
 - `ir-isolation-lab-key.pem`
 - `lambda_function.zip`
 - `simulator_lambda.zip`
+- `slack_notifier_lambda.zip`
 
 ## Cost note
 
@@ -345,14 +404,18 @@ If left running, the main cost is the EC2 instance (`t3.micro`, roughly $8-10/mo
 - SNS email subscriptions require manual confirmation
 - The simulator uses temporary CPU stress only; it is not real malware
 - Automated isolation may take 1-2 minutes after the simulator starts due to CloudWatch alarm timing
+- Slack messages post to the webhook channel only; confirm you are watching the correct channel
 
 ## Troubleshooting
 
 | Issue | Fix |
 |-------|-----|
 | `terraform plan` fails with credential errors | Run `aws configure` and verify with `aws sts get-caller-identity` |
-| Simulator fails with SSM error | Wait for SSM agent to come online; confirm instance has IAM SSM permissions |
-| Alarm never enters `ALARM` | Confirm simulator ran; check CPU metric; lower threshold in variables if needed |
+| Simulator fails with SSM error | Wait for SSM agent to come online; install with `dnf install -y amazon-ssm-agent` if missing |
+| Alarm never enters `ALARM` | Confirm simulator ran; check CPU metric; lower threshold in variables or alarm console |
 | Isolation Lambda permission error | Re-run `terraform apply`; check CloudWatch Logs |
 | No SNS email received | Confirm the subscription in your inbox |
 | HTTP still works after isolation | Refresh EC2 console; confirm quarantine SG is attached |
+| Slack test works but alarm/isolation messages missing | Open the webhook channel; search for `CloudWatch Alarm Triggered`; check Slack Lambda logs |
+| Slack Lambda errors on secret | Confirm secret value is a plain webhook URL with no quotes or JSON wrapper |
+| No Slack messages at all | Confirm secret value is set; run SNS test publish; check `/aws/lambda/<slack_notifier_lambda_name>` logs |
