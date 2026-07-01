@@ -1,10 +1,13 @@
 import json
+import logging
 import os
 import urllib.error
 import urllib.request
 
 import boto3
-from botocore.exceptions import ClientError
+
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
 
 
 def _get_env(name: str) -> str:
@@ -55,7 +58,7 @@ def _format_alarm_message(message: dict) -> str:
         header = f"CloudWatch Alarm Update ({state})"
 
     return (
-        f"*{header}*\n"
+        f"{header}\n"
         f"Alarm:     {alarm_name}\n"
         f"State:     {state}\n"
         f"Instance:  {instance_id}\n"
@@ -78,7 +81,7 @@ def _format_isolation_message(message: dict) -> str:
     snapshots_text = ", ".join(snapshot_ids) if snapshot_ids else "none"
 
     lines = [
-        f"*{header}*",
+        header,
         f"Incident Type: {message.get('incident_type', 'unknown')}",
         f"Instance ID:   {message.get('instance_id', 'unknown')}",
         f"Snapshots:     {snapshots_text}",
@@ -97,32 +100,32 @@ def _format_isolation_message(message: dict) -> str:
 
 def _format_generic_message(subject: str, message_raw: str) -> str:
     return (
-        "*SNS Notification Received*\n"
+        "SNS Notification Received\n"
         f"Subject: {subject or 'none'}\n"
         f"Message: {message_raw}"
     )
 
 
-def _build_slack_text(subject: str, message_raw: str) -> str:
+def _detect_message_type(message_raw: str) -> tuple[str, str]:
     try:
         message = json.loads(message_raw)
     except json.JSONDecodeError:
-        return _format_generic_message(subject, message_raw)
+        return "generic", _format_generic_message("", message_raw)
 
     if not isinstance(message, dict):
-        return _format_generic_message(subject, message_raw)
+        return "generic", _format_generic_message("", message_raw)
 
     if message.get("event") == "ec2_instance_isolated" or message.get("final_status"):
-        return _format_isolation_message(message)
+        return "isolation", _format_isolation_message(message)
 
     if message.get("AlarmName") and message.get("NewStateValue"):
-        return _format_alarm_message(message)
+        return "alarm", _format_alarm_message(message)
 
-    return _format_generic_message(subject, message_raw)
+    return "generic", _format_generic_message("", message_raw)
 
 
-def _post_to_slack(webhook_url: str, text: str) -> None:
-    payload = json.dumps({"text": text}).encode("utf-8")
+def _post_to_slack(webhook_url: str, text: str) -> str:
+    payload = json.dumps({"text": text, "mrkdwn": False}).encode("utf-8")
     request = urllib.request.Request(
         webhook_url,
         data=payload,
@@ -132,8 +135,12 @@ def _post_to_slack(webhook_url: str, text: str) -> None:
 
     try:
         with urllib.request.urlopen(request, timeout=10) as response:
+            body = response.read().decode("utf-8", errors="replace").strip()
             if response.status >= 400:
-                raise RuntimeError(f"Slack webhook returned HTTP {response.status}")
+                raise RuntimeError(f"Slack webhook returned HTTP {response.status}: {body}")
+            if body and body != "ok":
+                raise RuntimeError(f"Unexpected Slack response: {body}")
+            return body or "ok"
     except urllib.error.HTTPError as error:
         body = error.read().decode("utf-8", errors="replace")
         raise RuntimeError(f"Slack webhook HTTP {error.code}: {body}") from error
@@ -148,16 +155,21 @@ def handler(event, context):
     subject = sns_record.get("Subject", "")
     message_raw = sns_record.get("Message", "")
 
-    slack_text = _build_slack_text(subject, message_raw)
+    message_type, slack_text = _detect_message_type(message_raw)
+    logger.info("Sending Slack notification type=%s subject=%s", message_type, subject)
+
     webhook_url = _get_webhook_url()
-    _post_to_slack(webhook_url, slack_text)
+    slack_response = _post_to_slack(webhook_url, slack_text)
+    logger.info("Slack notification sent type=%s response=%s", message_type, slack_response)
 
     return {
         "statusCode": 200,
         "body": json.dumps(
             {
                 "message": "Slack notification sent",
+                "message_type": message_type,
                 "subject": subject,
+                "slack_response": slack_response,
             }
         ),
     }
