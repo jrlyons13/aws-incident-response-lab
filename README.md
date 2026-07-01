@@ -1,4 +1,4 @@
-# AWS EC2 Incident Response Isolation Lab (v1.4)
+# AWS EC2 Incident Response Isolation Lab (v1.5)
 
 A beginner-friendly Terraform project for practicing EC2 incident response isolation. Deploy a small lab in `us-east-1`, simulate a cryptojacking/resource exhaustion incident, and let CloudWatch + SNS automatically trigger isolation.
 
@@ -23,6 +23,15 @@ A beginner-friendly Terraform project for practicing EC2 incident response isola
   3. Attach the quarantine security group
   4. Publish a detailed SNS notification
 
+### v1.5 (Slack notifications)
+
+- Adds a **Slack notifier Lambda** as a second SNS subscriber
+- Reads the Slack **Incoming Webhook URL** from **AWS Secrets Manager**
+- Sends human-readable Slack messages for:
+  - **CloudWatch alarms** — header: `CloudWatch Alarm Triggered` or `CloudWatch Alarm Cleared`
+  - **Isolation events** — header: `Isolation Has Occurred` or `Isolation Failed`
+- Does **not** modify the existing isolation Lambda
+
 Manual isolation still works with:
 
 ```json
@@ -45,7 +54,7 @@ Manual isolation still works with:
 4. CloudWatch alarm enters `ALARM`
 5. SNS invokes isolation Lambda
 6. Isolation Lambda creates tagged EBS snapshots, removes IAM profile, attaches quarantine SG, and notifies SNS
-7. Email subscribers receive the incident details
+7. Email and Slack subscribers receive the incident details
 
 ## Prerequisites
 
@@ -53,7 +62,8 @@ Before you deploy, make sure you have:
 
 1. **Terraform** >= 1.5 installed
 2. **AWS CLI** installed and configured
-3. **AWS credentials** with permission to create VPC, EC2, IAM, Lambda, SNS, CloudWatch, and SSM resources
+3. **AWS credentials** with permission to create VPC, EC2, IAM, Lambda, SNS, CloudWatch, SSM, and Secrets Manager resources
+4. A **Slack Incoming Webhook URL** (for v1.5 Slack notifications)
 
 ### Configure AWS credentials
 
@@ -78,6 +88,7 @@ aws sts get-caller-identity
 | `outputs.tf` | Useful values after deployment |
 | `lambda_function.py` | Isolation handler code |
 | `simulator_lambda.py` | CPU stress simulator handler code |
+| `slack_notifier_lambda.py` | Slack notification handler code |
 
 ## Deploy the lab
 
@@ -94,6 +105,46 @@ After apply completes:
 ```powershell
 terraform output
 ```
+
+### Configure the Slack webhook secret (v1.5)
+
+Terraform creates the Secrets Manager secret, but **you add the webhook URL manually** so it is not stored in Terraform state or code.
+
+After `terraform apply`, run:
+
+```powershell
+aws secretsmanager put-secret-value `
+  --secret-id (terraform output -raw slack_webhook_secret_name) `
+  --secret-string "https://hooks.slack.com/services/YOUR/WEBHOOK/URL"
+```
+
+Or in the AWS Console:
+
+1. Open **Secrets Manager**
+2. Select the secret named in `terraform output slack_webhook_secret_name`
+3. Choose **Retrieve secret value** → **Edit**
+4. Paste your Slack Incoming Webhook URL
+5. Save
+
+The Slack notifier Lambda will not work until this secret value is set.
+
+### Test Slack notifications
+
+Send a test message through SNS:
+
+```powershell
+aws sns publish `
+  --topic-arn (terraform output -raw sns_topic_arn) `
+  --subject "IR Lab Slack Test" `
+  --message "Test notification from the incident response lab."
+```
+
+During a full incident simulation you should receive **two Slack messages**:
+
+1. **CloudWatch Alarm Triggered** when the CPU alarm enters `ALARM`
+2. **Isolation Has Occurred** after the isolation Lambda completes
+
+Check CloudWatch Logs for `terraform output -raw slack_notifier_lambda_name` if Slack messages do not appear.
 
 Terraform also creates a private key file named `ir-isolation-lab-key.pem` in this directory.
 

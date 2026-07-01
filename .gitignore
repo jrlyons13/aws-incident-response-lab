@@ -5,6 +5,7 @@
 *.pem
 lambda_function.zip
 simulator_lambda.zip
+slack_notifier_lambda.zip
 payload.json
 isolate-out.json
 simulator-out.json

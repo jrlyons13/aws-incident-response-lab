@@ -476,3 +476,98 @@ resource "aws_sns_topic_subscription" "isolate_lambda" {
 
   depends_on = [aws_lambda_permission.sns_invoke_isolate]
 }
+
+resource "aws_secretsmanager_secret" "slack_webhook" {
+  name        = "${var.project_name}/slack-webhook-url"
+  description = "Slack incoming webhook URL for incident notifications. Set the value manually after apply."
+
+  tags = {
+    Name = "${var.project_name}-slack-webhook-url"
+  }
+}
+
+resource "aws_iam_role" "lambda_slack" {
+  name = "${var.project_name}-slack-lambda-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Principal = {
+          Service = "lambda.amazonaws.com"
+        }
+        Action = "sts:AssumeRole"
+      }
+    ]
+  })
+
+  tags = {
+    Name = "${var.project_name}-slack-lambda-role"
+  }
+}
+
+resource "aws_iam_role_policy_attachment" "lambda_slack_basic" {
+  role       = aws_iam_role.lambda_slack.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+}
+
+resource "aws_iam_role_policy" "lambda_slack_secrets" {
+  name = "${var.project_name}-slack-secrets-policy"
+  role = aws_iam_role.lambda_slack.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid      = "ReadSlackWebhookSecret"
+        Effect   = "Allow"
+        Action   = "secretsmanager:GetSecretValue"
+        Resource = aws_secretsmanager_secret.slack_webhook.arn
+      }
+    ]
+  })
+}
+
+data "archive_file" "slack_notifier_lambda_zip" {
+  type        = "zip"
+  source_file = "${path.module}/slack_notifier_lambda.py"
+  output_path = "${path.module}/slack_notifier_lambda.zip"
+}
+
+resource "aws_lambda_function" "slack_notifier" {
+  function_name    = "${var.project_name}-slack-notifier"
+  role             = aws_iam_role.lambda_slack.arn
+  handler          = "slack_notifier_lambda.handler"
+  runtime          = "python3.12"
+  filename         = data.archive_file.slack_notifier_lambda_zip.output_path
+  source_code_hash = data.archive_file.slack_notifier_lambda_zip.output_base64sha256
+  timeout          = 30
+
+  environment {
+    variables = {
+      SLACK_WEBHOOK_SECRET_ARN = aws_secretsmanager_secret.slack_webhook.arn
+      AWS_REGION_NAME          = var.aws_region
+    }
+  }
+
+  tags = {
+    Name = "${var.project_name}-slack-notifier"
+  }
+}
+
+resource "aws_lambda_permission" "sns_invoke_slack" {
+  statement_id  = "AllowExecutionFromSNS"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.slack_notifier.function_name
+  principal     = "sns.amazonaws.com"
+  source_arn    = aws_sns_topic.incident.arn
+}
+
+resource "aws_sns_topic_subscription" "slack_lambda" {
+  topic_arn = aws_sns_topic.incident.arn
+  protocol  = "lambda"
+  endpoint  = aws_lambda_function.slack_notifier.arn
+
+  depends_on = [aws_lambda_permission.sns_invoke_slack]
+}

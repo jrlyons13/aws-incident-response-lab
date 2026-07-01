@@ -38,6 +38,21 @@ output "cloudwatch_alarm_name" {
   value       = aws_cloudwatch_metric_alarm.cpu_high.alarm_name
 }
 
+output "slack_notifier_lambda_name" {
+  description = "Name of the Slack notifier Lambda function."
+  value       = aws_lambda_function.slack_notifier.function_name
+}
+
+output "slack_webhook_secret_name" {
+  description = "Secrets Manager secret name for the Slack webhook URL. Set the value manually after apply."
+  value       = aws_secretsmanager_secret.slack_webhook.name
+}
+
+output "slack_webhook_secret_arn" {
+  description = "Secrets Manager secret ARN for the Slack webhook URL."
+  value       = aws_secretsmanager_secret.slack_webhook.arn
+}
+
 # Backward-compatible alias for v1.0 output name
 output "lambda_function_name" {
   description = "Alias for isolation_lambda_name."
